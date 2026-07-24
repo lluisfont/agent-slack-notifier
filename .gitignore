@@ -1,4 +1,5 @@
 config.local.json
 *.backup-*
+*.log
 .DS_Store
 Thumbs.db
