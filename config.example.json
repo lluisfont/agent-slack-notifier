@@ -1,7 +1,11 @@
 {
-  "slackWebhookUrl": "https://hooks.slack.com/services/REPLACE/ME",
+  "schemaVersion": 2,
+  "slackWebhookProtected": "GENERATED_BY_INSTALLER_DO_NOT_EDIT",
   "machineName": "PC-HOME",
   "machineIcon": "house",
-  "notifyOnCompletion": false,
-  "projectOverrides": {}
+  "duplicateWindowSeconds": 30,
+  "requestTimeoutSeconds": 10,
+  "projectOverrides": {
+    "C:\\Projects\\innovision-studio": "Innovision Studio"
+  }
 }
