@@ -1,0 +1,7 @@
+{
+  "slackWebhookUrl": "https://hooks.slack.com/services/REPLACE/ME",
+  "machineName": "PC-HOME",
+  "machineIcon": "house",
+  "notifyOnCompletion": false,
+  "projectOverrides": {}
+}
