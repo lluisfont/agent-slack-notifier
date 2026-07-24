@@ -1,41 +1,48 @@
 # AI Agent Slack Notifier
 
-Lightweight Slack notifications for **Codex** and **Claude Code** when human attention is required.
+Lightweight Slack alerts for **Codex CLI** and **Claude Code** when an AI coding session requires human attention.
 
-Designed for developers running multiple AI coding agents across several computers and projects. The notifier avoids noisy progress logs and only sends actionable alerts such as permission requests, blocked executions, or requests for user input.
+The project is designed for developers running several agents across multiple Windows computers and repositories. It sends actionable notifications instead of continuous progress logs.
 
-## What it notifies
+## Supported scope
 
-- Claude Code requests permission.
-- Claude Code is waiting for user input.
-- A background Claude Code agent needs attention.
-- Codex displays a permission request.
-- Manual installation and connection tests.
+| Agent | Supported surface | Trigger |
+|---|---|---|
+| Claude Code | CLI on Windows | `Notification` events for permission prompts, idle prompts, and elicitation dialogs |
+| Codex | Codex CLI on Windows | `PermissionRequest` user hook |
 
-It does not send every command or continuous progress updates.
+**Not guaranteed:** Codex Desktop and IDE extensions may not execute user hooks in the same way as Codex CLI. This repository does not claim support for those surfaces.
 
-## Message contents
+## Notification contents
 
-Each Slack alert can include:
+Each alert can include:
 
-- computer name;
-- detected project;
+- computer name and icon;
+- project name;
 - agent name;
 - event type;
 - Git branch;
-- reason;
+- reason for the interruption;
 - working directory;
 - timestamp.
 
+Duplicate alerts are suppressed for 30 seconds by default.
+
 ## Requirements
 
-- Windows 10 or Windows 11.
-- PowerShell 5.1 or later.
-- Codex CLI and/or Claude Code already installed.
-- A Slack Incoming Webhook.
-- Git is optional, but enables project and branch detection.
+- Windows 10 or Windows 11;
+- Windows PowerShell 5.1 or later;
+- Codex CLI and/or Claude Code installed;
+- a Slack Incoming Webhook;
+- Git, optional but recommended for project and branch detection.
 
-## Quick installation
+## Slack setup
+
+Create a Slack app with an Incoming Webhook and connect it to the channel that will receive agent alerts. See [docs/SLACK_SETUP.md](docs/SLACK_SETUP.md).
+
+Treat the webhook URL as a secret. The installer protects it with Windows DPAPI so it can only be decrypted by the same Windows user on the same machine.
+
+## Installation
 
 Clone the repository and open PowerShell in the project directory:
 
@@ -46,23 +53,31 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\install.ps1
 ```
 
-The installer asks for the Slack webhook URL and sends a test notification.
+The installer:
 
-### Non-interactive example
+1. asks for the Slack Incoming Webhook;
+2. installs the shared notifier in `~/.ai-agent-slack-notifier`;
+3. merges hooks without deleting unrelated agent configuration;
+4. creates timestamped backups before changing existing files;
+5. encrypts the webhook for the current Windows user;
+6. sends a Slack connection test.
+
+### Non-interactive installation
 
 ```powershell
 .\install.ps1 `
   -Agents Both `
   -MachineName "PC-HOME" `
   -MachineIcon house `
-  -SlackWebhookUrl "https://hooks.slack.com/services/..."
+  -SlackWebhookUrl "https://hooks.slack.com/services/..." `
+  -NonInteractive
 ```
 
 Supported icons: `house`, `office`, `laptop`, `robot`, and `desktop`.
 
-## Installation on several computers
+### Four-computer example
 
-Use the same repository and Slack webhook on every machine. Change only the machine name and icon:
+Run the installer independently on each computer, using the same Slack webhook but a different machine name:
 
 ```powershell
 .\install.ps1 -MachineName "PC-HOME" -MachineIcon house
@@ -71,36 +86,91 @@ Use the same repository and Slack webhook on every machine. Change only the mach
 .\install.ps1 -MachineName "MINIPC-AI" -MachineIcon robot
 ```
 
-All alerts can be sent to a single Slack channel such as `#ai-agents-alerts`.
+## Codex CLI activation
 
-## Required Codex step
+The installer enables the Codex `hooks` feature in `~/.codex/config.toml` and writes the user hook to `~/.codex/hooks.json`.
 
-Codex requires new hooks to be reviewed before execution:
+After installation:
 
-1. Restart Codex after installation.
-2. Run `/hooks`.
-3. Locate the `PermissionRequest` hook.
-4. Mark it as **trusted**.
+1. restart Codex CLI;
+2. run `/hooks`;
+3. locate the `PermissionRequest` hook;
+4. review and trust it.
 
-Codex will ignore the hook until it is trusted.
+A successful installer test only proves that Slack is reachable. It does **not** prove that Codex has trusted and executed the hook.
+
+## Project naming
+
+The notifier resolves a project name in this order:
+
+1. nearest `.ai-agent-project.json` found in the current directory or a parent directory;
+2. matching path in `projectOverrides`;
+3. Git repository root name;
+4. current directory name.
+
+Add this file to a repository when its display name should differ from the folder name:
+
+```json
+{
+  "project": "Innovision Studio",
+  "client": "Innovision"
+}
+```
+
+See [examples/.ai-agent-project.json](examples/.ai-agent-project.json).
 
 ## Installed files
 
 ```text
 ~/.ai-agent-slack-notifier/
 ├── config.local.json
+├── last-notification.json
+├── notifier.log
 └── notify-slack.ps1
 
 ~/.claude/settings.json
+~/.codex/config.toml
 ~/.codex/hooks.json
 ```
 
-The installer creates timestamped backups before modifying existing agent configuration files.
+`config.local.json`, logs, local state, and backup files must not be committed.
 
-## Manual test
+## Validation and tests
+
+Run repository checks without contacting Slack:
 
 ```powershell
-.\test.ps1
+.\validate.ps1
+```
+
+Run syntax, JSON, installed-configuration, and Slack tests:
+
+```powershell
+.\test.ps1 -Mode All
+```
+
+Run only the Slack test:
+
+```powershell
+.\test.ps1 -Mode Slack
+```
+
+The GitHub Actions workflow runs `validate.ps1` on `windows-latest` for every push and pull request.
+
+## Reinstallation and updates
+
+The installer is idempotent:
+
+- notifier hook entries are replaced instead of duplicated;
+- unrelated hooks are preserved;
+- project overrides and runtime settings are preserved;
+- timestamped backups are created before agent configuration changes.
+
+To update:
+
+```powershell
+git pull
+.\install.ps1
 ```
 
 ## Uninstallation
@@ -109,47 +179,33 @@ The installer creates timestamped backups before modifying existing agent config
 .\uninstall.ps1
 ```
 
-The uninstaller removes only notifier-related hook entries and the local notifier directory.
+The uninstaller removes only hook entries belonging to this project and deletes `~/.ai-agent-slack-notifier`. It leaves the Codex hooks feature enabled because other hooks may depend on it.
 
-## Security
+## Troubleshooting
 
-The Slack webhook URL is stored locally in:
+See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
-```text
-~/.ai-agent-slack-notifier/config.local.json
-```
-
-Do not commit this file, paste the webhook into issues, or include it in public screenshots.
-
-## Documentation
-
-- [Slack webhook setup](docs/SLACK_SETUP.md)
-- [Troubleshooting](docs/TROUBLESHOOTING.md)
-
-## Project structure
+Runtime errors are written to:
 
 ```text
-agent-slack-notifier/
-├── README.md
-├── config.example.json
-├── install.ps1
-├── test.ps1
-├── uninstall.ps1
-├── docs/
-│   ├── SLACK_SETUP.md
-│   └── TROUBLESHOOTING.md
-├── examples/
-│   └── .ai-agent-project.json
-└── scripts/
-    └── notify-slack.ps1
+~/.ai-agent-slack-notifier/notifier.log
 ```
+
+## Security notes
+
+- Never commit or publish a Slack webhook.
+- Revoke the webhook in Slack if it is exposed.
+- The protected webhook cannot be moved to another Windows account or computer and decrypted there.
+- Hook payloads are limited and escaped before being sent to Slack.
+- The notifier uses a request timeout and one retry.
 
 ## Official references
 
-- Claude Code hooks: `https://code.claude.com/docs/en/hooks-guide`
-- Codex hooks: `https://learn.chatgpt.com/docs/hooks`
-- Codex configuration reference: `https://learn.chatgpt.com/docs/config-file/config-reference`
+- Claude Code hooks: `https://code.claude.com/docs/en/hooks`
+- Claude Code hooks guide: `https://code.claude.com/docs/en/hooks-guide`
+- Codex hooks documentation: `https://developers.openai.com/codex/hooks`
+- Codex configuration reference: `https://developers.openai.com/codex/config-reference`
 
 ## License
 
-MIT License.
+MIT License. See [LICENSE](LICENSE).
