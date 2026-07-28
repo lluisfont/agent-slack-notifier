@@ -30,7 +30,16 @@ function Write-NotifierLog {
 
 function Read-StdinAll {
     if ([Console]::IsInputRedirected) {
-        return [Console]::In.ReadToEnd()
+        # Read the raw stream ourselves as UTF-8 instead of [Console]::In,
+        # which decodes using the console's OEM code page (e.g. CP437 on
+        # this machine) when stdin is redirected -- that silently mangled
+        # every non-ASCII character (accents, em dashes) sent by the Claude
+        # Code hook before it ever reached Slack. Setting
+        # [Console]::InputEncoding directly is not a safe alternative here:
+        # it throws "The handle is invalid" on a redirected/piped stdin.
+        $stdinStream = [Console]::OpenStandardInput()
+        $reader = New-Object System.IO.StreamReader($stdinStream, [System.Text.Encoding]::UTF8)
+        return $reader.ReadToEnd()
     }
     return ''
 }
@@ -89,6 +98,28 @@ function Escape-SlackText {
 
     $text = Limit-Text -Value $Value
     return $text.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;')
+}
+
+function Get-LastAssistantSummary {
+    param(
+        $Value,
+        [int]$MaximumLength = 500
+    )
+
+    $text = "$Value".Trim()
+    if (-not $text) {
+        return ''
+    }
+
+    # Collapse runs of blank lines so a long multi-paragraph answer stays
+    # skimmable as a single Slack section instead of a wall of whitespace.
+    $text = $text -replace '(\r?\n){2,}', "`n`n"
+
+    if ($text.Length -le $MaximumLength) {
+        return $text
+    }
+
+    return $text.Substring(0, [Math]::Max(0, $MaximumLength - 1)) + '…'
 }
 
 function Get-GitBranch {
@@ -198,7 +229,17 @@ function Test-DuplicateNotification {
     if (Test-Path $statePath) {
         try {
             $state = Get-Content -Raw -Path $statePath | ConvertFrom-Json
-            $previousTime = [DateTimeOffset]::Parse("$($state.timestamp)")
+            # Force invariant culture and round-trip parsing here -- without
+            # it, a mismatch between the culture active when this value was
+            # written (`.ToString('o')`, always invariant) and whatever
+            # culture happens to be active for this Parse() call (e.g. an
+            # es-ES locale reading day/month where the string was produced
+            # month/day) turns any day-of-month above 12 into an invalid
+            # month and silently disables duplicate-notification dedup.
+            $previousTime = [DateTimeOffset]::Parse(
+                [string]$state.timestamp,
+                [System.Globalization.CultureInfo]::InvariantCulture,
+                [System.Globalization.DateTimeStyles]::RoundtripKind)
             if ("$($state.fingerprint)" -eq $Fingerprint -and ($now - $previousTime).TotalSeconds -lt $WindowSeconds) {
                 return $true
             }
@@ -304,11 +345,26 @@ try {
             if (-not $reason) {
                 $notificationType = Get-PropertyValue -Object $data -Names @('notification_type') -Default ''
                 $toolName = Get-PropertyValue -Object $data -Names @('tool_name') -Default ''
+                # Stop/SubagentStop payloads carry no ready-made "reason"/"message"
+                # field (those only exist on Notification-hook payloads, handled
+                # above) -- but they do carry the actual final text of the turn.
+                # Use that instead of a generic fallback so the Slack message says
+                # what actually happened, and so two genuinely different stops
+                # never collide on the duplicate-suppression fingerprint below
+                # (which is partly derived from this reason string): a fixed
+                # fallback string made every Stop/SubagentStop within the same
+                # project look identical, which could cause a later, genuinely
+                # distinct stop to be silently dropped as a "duplicate" of an
+                # earlier one if both landed inside the dedupe window.
+                $lastAssistantMessage = Get-PropertyValue -Object $data -Names @('last_assistant_message') -Default ''
                 if ($toolName) {
                     $reason = "Claude Code requests permission to use: $toolName"
                 }
                 elseif ($notificationType) {
                     $reason = "Claude Code requires attention: $notificationType"
+                }
+                elseif ($lastAssistantMessage) {
+                    $reason = Get-LastAssistantSummary -Value $lastAssistantMessage
                 }
                 else {
                     $reason = 'Claude Code is waiting for input or authorization.'
@@ -331,6 +387,7 @@ try {
 
     $project = Get-ProjectName -WorkingDirectory $workingDirectory -Config $config
     $branch = Get-GitBranch -WorkingDirectory $workingDirectory
+    $subagentType = "$((Get-PropertyValue -Object $data -Names @('agent_type') -Default ''))"
     $machine = if ($config.machineName) { "$($config.machineName)" } else { $env:COMPUTERNAME }
     $agentLabel = switch ($Agent) {
         'claude' { 'Claude Code' }
@@ -345,11 +402,22 @@ try {
         default { ':desktop_computer:' }
     }
 
+    # Stop/SubagentStop just mean "a turn finished" -- most of the time (an
+    # autonomous run's routine progress) nothing is actually blocked on the
+    # user. Only Notification-hook events (permission_prompt, idle_prompt,
+    # elicitation_dialog, agent_needs_input) genuinely mean "come do
+    # something". Framing both the same way ("Attention required... waiting
+    # for authorization") was misleading for the former.
+    $isAttentionEvent = $eventName -notin @('Stop', 'SubagentStop')
+    $headerVerb = if ($isAttentionEvent) { 'Attention required' } else { 'Stopped' }
+    $summaryVerb = if ($isAttentionEvent) { 'needs attention' } else { 'stopped' }
+
     $eventName = Escape-SlackText -Value $eventName
     $reason = Escape-SlackText -Value $reason
     $project = Escape-SlackText -Value $project
     $machine = Escape-SlackText -Value $machine
     $branch = Escape-SlackText -Value $branch
+    $subagentType = Escape-SlackText -Value $subagentType
     $safeDirectory = Escape-SlackText -Value $workingDirectory
 
     $fingerprintSource = "$Agent|$machine|$project|$eventName|$reason|$safeDirectory"
@@ -380,11 +448,14 @@ try {
     if ($branch) {
         $fields += @{ type = 'mrkdwn'; text = "*Branch:*`n$branch" }
     }
+    if ($subagentType) {
+        $fields += @{ type = 'mrkdwn'; text = "*Subagent:*`n$subagentType" }
+    }
 
     $payload = @{
-        text = "$agentLabel needs attention on $machine ($project)"
+        text = "$agentLabel $summaryVerb on $machine ($project)"
         blocks = @(
-            @{ type = 'header'; text = @{ type = 'plain_text'; text = "Attention required: $agentLabel"; emoji = $true } },
+            @{ type = 'header'; text = @{ type = 'plain_text'; text = "${headerVerb}: $agentLabel"; emoji = $true } },
             @{ type = 'section'; fields = $fields },
             @{ type = 'section'; text = @{ type = 'mrkdwn'; text = "*Reason:*`n$reason" } },
             @{ type = 'context'; elements = @(@{ type = 'mrkdwn'; text = "Directory: ``$safeDirectory`` | $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" }) }
